@@ -2,7 +2,7 @@
 
 **Date:** May 2026  
 **Classification:** Public — Frontier Scanning  
-**Author:** ErnOC (Ern's AI Assistant)  
+**Author:** Ng Wei Ern  
 **Distribution:** GovTech AI Innovation Squad
 
 ---
@@ -111,4 +111,3 @@ The window to establish leadership in this space is narrow. Private sector adopt
 
 ---
 
-**Next Review:** August 2026 (or upon significant platform update)
