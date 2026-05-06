@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 import pdfplumber
+from openai import OpenAI
 
 # Optional OCR support
 try:
@@ -20,6 +21,14 @@ try:
     OCR_AVAILABLE = True
 except ImportError:
     OCR_AVAILABLE = False
+
+try:
+    import anthropic
+except ImportError as e:
+    raise ImportError(
+        "anthropic package not installed. Install with: pip install anthropic "
+        "or add 'anthropic>=3.0.0' to requirements.txt"
+    ) from e
 
 
 def extract_text_from_pdf(file_path: str) -> str:
@@ -136,7 +145,7 @@ Rules:
 
 def analyze_with_anthropic(syllabus_text: str, exam_text: str) -> Dict[str, Any]:
     """Analyze using Anthropic Claude API."""
-    import anthropic
+
     api_key = os.getenv("ANTHROPIC_API_KEY", "")
     if not api_key:
         return {"error": "ANTHROPIC_API_KEY not set"}
@@ -144,21 +153,44 @@ def analyze_with_anthropic(syllabus_text: str, exam_text: str) -> Dict[str, Any]
     client = anthropic.Anthropic(api_key=api_key)
     prompt = build_analysis_prompt(syllabus_text, exam_text)
 
-    message = client.messages.create(
-        model="claude-haiku-3-5",
-        max_tokens=4096,
-        messages=[{"role": "user", "content": prompt}]
-    )
+    # Try a list of candidate Anthropic models until one succeeds.
+    candidate_models = []
+    env_model = os.getenv("ANTHROPIC_MODEL")
+    print(f"[analyzer] ANTHROPIC_MODEL env var: {repr(env_model)}")
+    if env_model:
+        candidate_models.append(env_model)
+    # candidate_models.extend(["claude-sonnet-4-6", "claude-haiku-3-5"])
 
-    content = message.content[0].text.strip()
-    content = re.sub(r"^```json\s*", "", content)
-    content = re.sub(r"\s*```$", "", content)
-    return json.loads(content)
+    last_exc = None
+    for model_name in candidate_models:
+        try:
+            print(f"[analyzer] Attempting Anthropic model: {model_name}")
+            message = client.messages.create(
+                model=model_name,
+                max_tokens=4096,
+                messages=[{"role": "user", "content": prompt}]
+            )
+
+            content = message.content[0].text.strip()
+            content = re.sub(r"^```json\s*", "", content)
+            content = re.sub(r"\s*```$", "", content)
+            print(f"[analyzer] Successfully used model: {model_name}")
+            return json.loads(content)
+        except Exception as e:
+            print(f"[analyzer] Model {model_name} failed: {str(e)[:200]}")
+            last_exc = e
+            # try next model
+            continue
+
+    # If none worked, surface the last exception so caller can log it and fallback.
+    if last_exc:
+        raise last_exc
+    return {"error": "Anthropic analysis failed for unknown reasons"}
 
 
 def analyze_with_openai(syllabus_text: str, exam_text: str, model: str = "gpt-4o-mini") -> Dict[str, Any]:
     """Analyze using OpenAI API."""
-    from openai import OpenAI
+    
     api_key = os.getenv("OPENAI_API_KEY", "")
     if not api_key:
         return {"error": "OPENAI_API_KEY not set"}
@@ -211,7 +243,7 @@ def run_analysis(syllabus_path: str, exam_path: str, model_preference: str = "au
     if model_preference in ("auto", "anthropic") and os.getenv("ANTHROPIC_API_KEY"):
         try:
             analysis = analyze_with_anthropic(syllabus_text, exam_text)
-            model_used = "claude-haiku-3-5"
+            model_used = "claude-sonnet-4-6"
         except Exception as e:
             result["anthropic_error"] = str(e)
 
@@ -227,73 +259,147 @@ def run_analysis(syllabus_path: str, exam_path: str, model_preference: str = "au
         analysis = _demo_analysis()
         model_used = "demo (no API key configured)"
 
+    analysis = _normalize_analysis(analysis)
     result["model_used"] = model_used
     result.update(analysis)
     return result
 
 
+def _normalize_analysis(analysis: Dict[str, Any]) -> Dict[str, Any]:
+    """Ensure the analysis has the chart data the UI depends on."""
+    normalized = dict(analysis)
+    questions = normalized.get("exam_questions") or []
+
+    if not normalized.get("topic_weightage"):
+        topic_marks: Dict[str, int] = {}
+        for question in questions:
+            topic = question.get("topic_mapped") or "Unmapped Topic"
+            marks = question.get("marks") or 0
+            topic_marks[topic] = topic_marks.get(topic, 0) + int(marks)
+
+        total_marks = sum(topic_marks.values())
+        normalized["topic_weightage"] = [
+            {
+                "topic": topic,
+                "marks": marks,
+                "percentage": round((marks / total_marks) * 100) if total_marks else 0,
+            }
+            for topic, marks in sorted(topic_marks.items(), key=lambda item: item[1], reverse=True)
+        ]
+
+    if not normalized.get("blooms_distribution"):
+        bloom_scores = {
+            "Remember": 0,
+            "Understand": 0,
+            "Apply": 0,
+            "Analyze": 0,
+            "Evaluate": 0,
+            "Create": 0,
+        }
+        total_marks = 0
+        for question in questions:
+            bloom_level = question.get("bloom_level")
+            marks = int(question.get("marks") or 0)
+            if bloom_level in bloom_scores:
+                bloom_scores[bloom_level] += marks
+                total_marks += marks
+
+        if total_marks:
+            normalized["blooms_distribution"] = {
+                level: round((marks / total_marks) * 100)
+                for level, marks in bloom_scores.items()
+            }
+        else:
+            normalized["blooms_distribution"] = bloom_scores
+
+    if not normalized.get("question_type_distribution"):
+        type_scores = {
+            "source-based": 0,
+            "essay": 0,
+            "short-answer": 0,
+            "structured": 0,
+        }
+        total_marks = 0
+        for question in questions:
+            q_type = question.get("question_type")
+            marks = int(question.get("marks") or 0)
+            if q_type in type_scores:
+                type_scores[q_type] += marks
+                total_marks += marks
+
+        if total_marks:
+            normalized["question_type_distribution"] = {
+                q_type: round((marks / total_marks) * 100)
+                for q_type, marks in type_scores.items()
+            }
+        else:
+            normalized["question_type_distribution"] = type_scores
+
+    return normalized
+
+
 def _get_fallback_syllabus() -> str:
     """Hardcoded syllabus content for demo when OCR is unavailable."""
     return """
-2174 HISTORY GCE ORDINARY LEVEL SYLLABUS (2025)
+        2174 HISTORY GCE ORDINARY LEVEL SYLLABUS (2025)
 
-SYLLABUS CONTENT
-The syllabus is organised into themes and units covering:
+        SYLLABUS CONTENT
+        The syllabus is organised into themes and units covering:
 
-THEME 1: EUROPE IN CRISIS, 1918–1939
-- The impact of World War I and the Treaty of Versailles
-- The rise of dictatorships: Fascism in Italy, Nazism in Germany
-- Appeasement and the road to war
+        THEME 1: EUROPE IN CRISIS, 1918–1939
+        - The impact of World War I and the Treaty of Versailles
+        - The rise of dictatorships: Fascism in Italy, Nazism in Germany
+        - Appeasement and the road to war
 
-THEME 2: EXTENSION OF EUROPEAN CONTROL IN SOUTHEAST ASIA, 1870s–1942
-- Motives for European expansion
-- Methods of establishing control: British Malaya, French Indochina, Dutch East Indies
-- Local responses: resistance and collaboration
+        THEME 2: EXTENSION OF EUROPEAN CONTROL IN SOUTHEAST ASIA, 1870s–1942
+        - Motives for European expansion
+        - Methods of establishing control: British Malaya, French Indochina, Dutch East Indies
+        - Local responses: resistance and collaboration
 
-THEME 3: CHALLENGES TO EUROPEAN DOMINANCE IN SOUTHEAST ASIA
-- Japanese expansion and occupation
-- Nationalist movements
-- End of colonial rule
+        THEME 3: CHALLENGES TO EUROPEAN DOMINANCE IN SOUTHEAST ASIA
+        - Japanese expansion and occupation
+        - Nationalist movements
+        - End of colonial rule
 
-ASSESSMENT OBJECTIVES
-AO1: Knowledge and understanding — recall, select, organise historical knowledge
-AO2: Handling sources — analyse, evaluate, use sources as historical evidence
-AO3: Making judgements — reach substantiated conclusions about causes, consequences, change, continuity, similarity, difference
+        ASSESSMENT OBJECTIVES
+        AO1: Knowledge and understanding — recall, select, organise historical knowledge
+        AO2: Handling sources — analyse, evaluate, use sources as historical evidence
+        AO3: Making judgements — reach substantiated conclusions about causes, consequences, change, continuity, similarity, difference
 
-SCHEME OF ASSESSMENT
-Paper 1 (2174/01): Source-Based Case Study + Structured Essay
-- Section A: Source-Based Case Study (30 marks)
-- Section B: Two essays from choice of questions (40 marks)
-Total: 70 marks, 1 hour 50 minutes
+        SCHEME OF ASSESSMENT
+        Paper 1 (2174/01): Source-Based Case Study + Structured Essay
+        - Section A: Source-Based Case Study (30 marks)
+        - Section B: Two essays from choice of questions (40 marks)
+        Total: 70 marks, 1 hour 50 minutes
 
-LEARNING OUTCOMES
-Students should demonstrate:
-- Historical knowledge and understanding of the periods studied
-- Skills: causation, change/continuity, significance, source analysis
-- Values: empathy, respect for diverse viewpoints, critical thinking
-"""
+        LEARNING OUTCOMES
+        Students should demonstrate:
+        - Historical knowledge and understanding of the periods studied
+        - Skills: causation, change/continuity, significance, source analysis
+        - Values: empathy, respect for diverse viewpoints, critical thinking
+            """
 
 
 def _get_fallback_exam() -> str:
     """Hardcoded exam content for demo."""
     return """
-HISTORY 2174/01 — Paper 1 — SPECIMEN PAPER
+        HISTORY 2174/01 — Paper 1 — SPECIMEN PAPER
 
-Section A: Source-Based Case Study (30 marks)
-Topic: Was Chamberlain right to follow a policy of appeasement towards Germany?
+        Section A: Source-Based Case Study (30 marks)
+        Topic: Was Chamberlain right to follow a policy of appeasement towards Germany?
 
-Question 1a: Study Source A. How useful is this source as evidence of Hitler's foreign policy ambitions? [6]
-Question 1b: Study Source B. Why do you think Rothermere wrote this letter? [5]
-Question 1c: Study Sources C and D. How far does Source D prove that Source C was wrong? [6]
-Question 1d: Study Source E. Do you think the cartoonist would have agreed with Chamberlain's policy of appeasement? [5]
-Question 1e: Study all the sources. 'Chamberlain was right to follow a policy of appeasement.' How far do these sources support this view? [8]
+        Question 1a: Study Source A. How useful is this source as evidence of Hitler's foreign policy ambitions? [6]
+        Question 1b: Study Source B. Why do you think Rothermere wrote this letter? [5]
+        Question 1c: Study Sources C and D. How far does Source D prove that Source C was wrong? [6]
+        Question 1d: Study Source E. Do you think the cartoonist would have agreed with Chamberlain's policy of appeasement? [5]
+        Question 1e: Study all the sources. 'Chamberlain was right to follow a policy of appeasement.' How far do these sources support this view? [8]
 
-Section B: Structured Essay (choose 2 from 4, 20 marks each)
-Q2: Why did European powers seek to extend their control over Southeast Asia in the late 19th century?
-Q3: How successful were the methods used by European powers to maintain control over Southeast Asia?
-Q4: Why did Japan seek to expand its empire in Southeast Asia in the 1930s and 1940s?
-Q5: How far was nationalism the main reason for the end of European control in Southeast Asia?
-"""
+        Section B: Structured Essay (choose 2 from 4, 20 marks each)
+        Q2: Why did European powers seek to extend their control over Southeast Asia in the late 19th century?
+        Q3: How successful were the methods used by European powers to maintain control over Southeast Asia?
+        Q4: Why did Japan seek to expand its empire in Southeast Asia in the 1930s and 1940s?
+        Q5: How far was nationalism the main reason for the end of European control in Southeast Asia?
+            """
 
 
 def _demo_analysis() -> Dict[str, Any]:

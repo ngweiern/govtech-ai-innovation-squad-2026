@@ -1,7 +1,7 @@
 # Exam Paper Analyzer — 15-Minute Presentation
 
 **MOE O-Level History Specimen Paper Analysis Tool**  
-Candidate: Ern | GovTech AI Innovation Squad Take-Home Assessment
+Candidate: Ng Wei Ern | GovTech AI Innovation Squad Take-Home Assessment
 
 ---
 

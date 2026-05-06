@@ -41,6 +41,14 @@
   ul.recs { padding-left:1.2rem; }
   ul.recs li { margin-bottom:0.5rem; font-size:0.875rem; line-height:1.5; }
   .chart-container { position:relative; height:220px; }
+  .chart-fallback { margin-top:1rem; font-size:0.85rem; }
+  .chart-list { list-style:none; padding:0; margin:0.5rem 0 0; }
+  .chart-list li { display:flex; justify-content:space-between; gap:1rem; padding:0.4rem 0; border-top:1px solid var(--border); }
+  .chart-list li:first-child { border-top:none; }
+  .chart-list .label { color:var(--text); flex:1; min-width:0; }
+  .chart-list .value { color:var(--muted); white-space:nowrap; font-variant-numeric:tabular-nums; }
+  .mini-bar { height:6px; border-radius:999px; background:#dbeafe; overflow:hidden; margin-top:0.35rem; }
+  .mini-bar > span { display:block; height:100%; background:var(--primary); }
   .missing { color:var(--red); font-size:0.875rem; }
   .covered { color:var(--green); font-size:0.875rem; }
   .summary-text { font-size:0.875rem; line-height:1.6; color:var(--text); }
@@ -99,12 +107,44 @@
     <div class="chart-container">
       <canvas id="weightageChart"></canvas>
     </div>
+    {% set tw = result.get('topic_weightage', []) %}
+    {% if tw %}
+    <div class="chart-fallback">
+      <ul class="chart-list">
+        {% for item in tw %}
+        <li>
+          <div class="label">
+            <div>{{ item.topic }}</div>
+            <div class="mini-bar"><span style="width: {{ item.percentage }}%"></span></div>
+          </div>
+          <div class="value">{{ item.marks }} marks | {{ item.percentage }}%</div>
+        </li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
   </div>
   <div class="card">
     <h2>Bloom's Taxonomy Distribution</h2>
     <div class="chart-container">
       <canvas id="bloomsChart"></canvas>
     </div>
+    {% set bl = result.get('blooms_distribution', {}) %}
+    {% if bl %}
+    <div class="chart-fallback">
+      <ul class="chart-list">
+        {% for level, value in bl.items() %}
+        <li>
+          <div class="label">
+            <div>{{ level }}</div>
+            <div class="mini-bar"><span style="width: {{ value }}%"></span></div>
+          </div>
+          <div class="value">{{ value }}%</div>
+        </li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
   </div>
 </div>
 
@@ -180,7 +220,7 @@
 </div>
 
 <script>
-const result = {{ result_json }};
+const result = {{ result_json | safe }};
 
 // Topic Weightage Chart
 const tw = result.topic_weightage || [];

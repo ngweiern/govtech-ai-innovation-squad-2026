@@ -2,7 +2,7 @@
 Exam Paper Analyzer — FastAPI Application
 Analyzes examination papers against syllabus objectives.
 """
-
+import uvicorn
 import os
 import json
 import tempfile
@@ -14,7 +14,7 @@ from fastapi.templating import Jinja2Templates
 import aiofiles
 from dotenv import load_dotenv
 
-from analyzer import run_analysis
+from analyzer import run_analysis, OCR_AVAILABLE
 
 load_dotenv()
 
@@ -88,7 +88,6 @@ async def api_analyze(
 
 @app.get("/health")
 async def health():
-    from analyzer import OCR_AVAILABLE
     return {
         "status": "ok",
         "anthropic_key": bool(os.getenv("ANTHROPIC_API_KEY")),
@@ -98,5 +97,4 @@ async def health():
 
 
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
